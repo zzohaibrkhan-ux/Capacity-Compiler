@@ -1,0 +1,553 @@
+'use client'
+
+import { useState, useCallback } from 'react'
+import { Upload, FileSpreadsheet, Download, Trash2, CheckCircle, Loader2 } from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { useToast } from '@/hooks/use-toast'
+import * as XLSX from 'xlsx'
+
+// ============================================
+// TYPES
+// ============================================
+
+interface ProcessedRow {
+  Date: Date
+  'Week#': number
+  'Capacity reliability score': number
+  'Completed routes': number | null
+  'Amazon paid cancels': number | null
+  'DSP dropped routes': number | null
+  'Reliability target': number | null
+  'Route target': number | null
+  'Flex-up route target': number | null
+  'Final scheduled': number | null
+  'DSP available capacity': number | null
+}
+
+// ============================================
+// EXCEL PROCESSING FUNCTIONS
+// ============================================
+
+function parseNumber(value: any): number | null {
+  if (value === null || value === undefined || value === '-' || value === '') {
+    return null
+  }
+  
+  if (typeof value === 'number') {
+    return value
+  }
+  
+  if (typeof value === 'string') {
+    // Remove percentage sign and parse
+    const cleanValue = value.replace('%', '').trim()
+    const parsed = parseFloat(cleanValue)
+    if (!isNaN(parsed)) {
+      // If it was a percentage, convert to decimal
+      if (value.includes('%')) {
+        return parsed / 100
+      }
+      return parsed
+    }
+  }
+  
+  return null
+}
+
+function getWeekNumber(date: Date): number {
+  const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()))
+  const dayNum = d.getUTCDay() || 7
+  d.setUTCDate(d.getUTCDate() + 4 - dayNum)
+  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1))
+  const weekNo = Math.ceil((((d.getTime() - yearStart.getTime()) / 86400000) + 1) / 7)
+  return weekNo
+}
+
+function processExcelFile(arrayBuffer: ArrayBuffer): ProcessedRow[] {
+  const workbook = XLSX.read(arrayBuffer, { type: 'array', cellDates: true })
+  const firstSheetName = workbook.SheetNames[0]
+  const worksheet = workbook.Sheets[firstSheetName]
+  
+  // Get all data as array of arrays
+  const data: (string | number | Date | null)[][] = XLSX.utils.sheet_to_json(worksheet, { 
+    header: 1,
+    defval: null,
+    blankrows: false
+  })
+  
+  const processedRows: ProcessedRow[] = []
+  
+  // Dates are in row 0 (index 0), columns 1 onwards
+  const dateRow = data[0]
+  const dates: Date[] = []
+  
+  for (let col = 1; col < dateRow.length; col++) {
+    const value = dateRow[col]
+    // Skip 'Total' column and null/undefined values
+    if (value && value !== 'Total' && value !== null && value !== undefined) {
+      if (value instanceof Date) {
+        dates.push(value)
+      } else if (typeof value === 'string') {
+        const parsedDate = new Date(value)
+        if (!isNaN(parsedDate.getTime())) {
+          dates.push(parsedDate)
+        }
+      } else if (typeof value === 'number') {
+        // Excel serial date
+        const date = XLSX.SSF.parse_date_code(value)
+        dates.push(date)
+      }
+    }
+  }
+  
+  // Process each date and extract corresponding values from rows 1-9
+  // Row indices: 1=Capacity reliability, 2=Completed routes, 3=Amazon paid cancels,
+  // 4=DSP dropped routes, 5=Reliability target, 6=Route target,
+  // 7=Flex-up route target, 8=Final scheduled, 9=DSP available capacity
+  
+  for (let dateIdx = 0; dateIdx < dates.length; dateIdx++) {
+    const date = dates[dateIdx]
+    const weekNumber = getWeekNumber(date)
+    
+    const row: ProcessedRow = {
+      Date: date,
+      'Week#': weekNumber,
+      'Capacity reliability score': 0,
+      'Completed routes': null,
+      'Amazon paid cancels': null,
+      'DSP dropped routes': null,
+      'Reliability target': null,
+      'Route target': null,
+      'Flex-up route target': null,
+      'Final scheduled': null,
+      'DSP available capacity': null
+    }
+    
+    // Extract values from each metric row (rows 1-9)
+    // Column index in data corresponds to dateIdx + 1 (since column 0 is the label)
+    const dataColIndex = dateIdx + 1
+    
+    if (data[1] && dataColIndex < data[1].length) {
+      row['Capacity reliability score'] = parseNumber(data[1][dataColIndex]) || 0
+    }
+    
+    if (data[2] && dataColIndex < data[2].length) {
+      row['Completed routes'] = parseNumber(data[2][dataColIndex])
+    }
+    
+    if (data[3] && dataColIndex < data[3].length) {
+      row['Amazon paid cancels'] = parseNumber(data[3][dataColIndex])
+    }
+    
+    if (data[4] && dataColIndex < data[4].length) {
+      row['DSP dropped routes'] = parseNumber(data[4][dataColIndex])
+    }
+    
+    if (data[5] && dataColIndex < data[5].length) {
+      row['Reliability target'] = parseNumber(data[5][dataColIndex])
+    }
+    
+    if (data[6] && dataColIndex < data[6].length) {
+      row['Route target'] = parseNumber(data[6][dataColIndex])
+    }
+    
+    if (data[7] && dataColIndex < data[7].length) {
+      row['Flex-up route target'] = parseNumber(data[7][dataColIndex])
+    }
+    
+    if (data[8] && dataColIndex < data[8].length) {
+      row['Final scheduled'] = parseNumber(data[8][dataColIndex])
+    }
+    
+    if (data[9] && dataColIndex < data[9].length) {
+      row['DSP available capacity'] = parseNumber(data[9][dataColIndex])
+    }
+    
+    processedRows.push(row)
+  }
+  
+  return processedRows
+}
+
+function generateCompiledExcel(allRows: ProcessedRow[]): ArrayBuffer {
+  // Sort all rows by date
+  allRows.sort((a, b) => a.Date.getTime() - b.Date.getTime())
+  
+  // Create workbook
+  const workbook = XLSX.utils.book_new()
+  
+  // Convert data to worksheet
+  const worksheetData = allRows.map(row => ({
+    Date: row.Date,
+    'Week#': row['Week#'],
+    'Capacity reliability score': row['Capacity reliability score'],
+    'Completed routes': row['Completed routes'],
+    'Amazon paid cancels': row['Amazon paid cancels'],
+    'DSP dropped routes': row['DSP dropped routes'],
+    'Reliability target': row['Reliability target'],
+    'Route target': row['Route target'],
+    'Flex-up route target': row['Flex-up route target'],
+    'Final scheduled': row['Final scheduled'],
+    'DSP available capacity': row['DSP available capacity']
+  }))
+  
+  const worksheet = XLSX.utils.json_to_sheet(worksheetData)
+  
+  // Set column widths
+  worksheet['!cols'] = [
+    { wch: 15 }, // Date
+    { wch: 8 },  // Week#
+    { wch: 22 }, // Capacity reliability score
+    { wch: 18 }, // Completed routes
+    { wch: 20 }, // Amazon paid cancels
+    { wch: 18 }, // DSP dropped routes
+    { wch: 18 }, // Reliability target
+    { wch: 14 }, // Route target
+    { wch: 20 }, // Flex-up route target
+    { wch: 16 }, // Final scheduled
+    { wch: 22 }  // DSP available capacity
+  ]
+  
+  XLSX.utils.book_append_sheet(workbook, worksheet, 'Compiled Data')
+  
+  // Write to buffer
+  const excelBuffer = XLSX.write(workbook, { 
+    bookType: 'xlsx',
+    type: 'array',
+    cellDates: true
+  })
+  
+  return excelBuffer as ArrayBuffer
+}
+
+// ============================================
+// MAIN COMPONENT
+// ============================================
+
+export default function Home() {
+  const [files, setFiles] = useState<File[]>([])
+  const [isProcessing, setIsProcessing] = useState(false)
+  const [compiledFileUrl, setCompiledFileUrl] = useState<string | null>(null)
+  const { toast } = useToast()
+
+  const onDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+  }, [])
+
+  const onDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+  }, [])
+
+  const onDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+
+    const droppedFiles = Array.from(e.dataTransfer.files).filter(
+      (file) => file.name.endsWith('.xlsx') || file.name.endsWith('.xls')
+    )
+
+    if (droppedFiles.length === 0) {
+      toast({
+        variant: 'destructive',
+        title: 'Invalid file type',
+        description: 'Please drop Excel files (.xlsx or .xls) only.',
+      })
+      return
+    }
+
+    setFiles((prev) => [...prev, ...droppedFiles])
+    setCompiledFileUrl(null)
+    toast({
+      title: 'Files added',
+      description: `${droppedFiles.length} file(s) added to the queue.`,
+    })
+  }, [toast])
+
+  const onFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const selectedFiles = Array.from(e.target.files || []).filter(
+      (file) => file.name.endsWith('.xlsx') || file.name.endsWith('.xls')
+    )
+
+    if (selectedFiles.length === 0) {
+      toast({
+        variant: 'destructive',
+        title: 'Invalid file type',
+        description: 'Please select Excel files (.xlsx or .xls) only.',
+      })
+      return
+    }
+
+    setFiles((prev) => [...prev, ...selectedFiles])
+    setCompiledFileUrl(null)
+    toast({
+      title: 'Files added',
+      description: `${selectedFiles.length} file(s) added to the queue.`,
+    })
+
+    e.target.value = ''
+  }, [toast])
+
+  const removeFile = useCallback((index: number) => {
+    setFiles((prev) => prev.filter((_, i) => i !== index))
+    setCompiledFileUrl(null)
+  }, [])
+
+  const compileFiles = async () => {
+    if (files.length === 0) {
+      toast({
+        variant: 'destructive',
+        title: 'No files to compile',
+        description: 'Please add files before compiling.',
+      })
+      return
+    }
+
+    setIsProcessing(true)
+    setCompiledFileUrl(null)
+
+    try {
+      const allRows: ProcessedRow[] = []
+
+      // Process each file
+      for (const file of files) {
+        try {
+          const arrayBuffer = await file.arrayBuffer()
+          const rows = processExcelFile(arrayBuffer)
+          allRows.push(...rows)
+        } catch (error) {
+          console.error(`Error processing file ${file.name}:`, error)
+          toast({
+            variant: 'destructive',
+            title: 'Processing Error',
+            description: `Could not process file: ${file.name}`,
+          })
+        }
+      }
+
+      if (allRows.length === 0) {
+        toast({
+          variant: 'destructive',
+          title: 'No Data',
+          description: 'No valid data could be extracted from the uploaded files.',
+        })
+        setIsProcessing(false)
+        return
+      }
+
+      // Generate compiled Excel file
+      const excelBuffer = generateCompiledExcel(allRows)
+      
+      // Create blob and URL
+      const blob = new Blob([excelBuffer], { 
+        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' 
+      })
+      const url = URL.createObjectURL(blob)
+      
+      setCompiledFileUrl(url)
+
+      toast({
+        title: 'Compilation complete',
+        description: `Successfully compiled ${allRows.length} rows from ${files.length} file(s).`,
+      })
+    } catch (error) {
+      console.error('Compilation error:', error)
+      toast({
+        variant: 'destructive',
+        title: 'Compilation failed',
+        description: 'An error occurred while compiling files.',
+      })
+    } finally {
+      setIsProcessing(false)
+    }
+  }
+
+  const downloadCompiledFile = useCallback(() => {
+    if (!compiledFileUrl) return
+
+    const link = document.createElement('a')
+    link.href = compiledFileUrl
+    link.download = `Capacity-Reliability-Compiled-${new Date().toISOString().split('T')[0]}.xlsx`
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+  }, [compiledFileUrl])
+
+  const clearAll = useCallback(() => {
+    setFiles([])
+    setCompiledFileUrl(null)
+    if (compiledFileUrl) {
+      URL.revokeObjectURL(compiledFileUrl)
+    }
+  }, [compiledFileUrl])
+
+  return (
+    <div className="min-h-screen flex flex-col bg-gradient-to-br from-slate-50 to-slate-100 dark:from-slate-950 dark:to-slate-900">
+      <main className="flex-1 container mx-auto px-4 py-8">
+        <div className="max-w-4xl mx-auto space-y-6">
+          <div className="text-center space-y-2">
+            <h1 className="text-4xl font-bold text-slate-900 dark:text-slate-50">
+              Excel File Compiler
+            </h1>
+            <p className="text-slate-600 dark:text-slate-400">
+              Compile multiple capacity reliability files into one document - 100% Client-side Processing
+            </p>
+          </div>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Upload Files</CardTitle>
+              <CardDescription>
+                Drag and drop Excel files or click to select multiple files. All processing happens in your browser - no data leaves your device.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div
+                className="border-2 border-dashed border-slate-300 dark:border-slate-700 rounded-lg p-12 text-center transition-colors hover:border-slate-400 dark:hover:border-slate-600 cursor-pointer"
+                onDragOver={onDragOver}
+                onDragLeave={onDragLeave}
+                onDrop={onDrop}
+              >
+                <input
+                  type="file"
+                  id="fileInput"
+                  multiple
+                  accept=".xlsx,.xls"
+                  onChange={onFileSelect}
+                  className="hidden"
+                />
+                <label htmlFor="fileInput" className="cursor-pointer">
+                  <Upload className="w-16 h-16 mx-auto mb-4 text-slate-400" />
+                  <p className="text-lg font-medium text-slate-700 dark:text-slate-300 mb-2">
+                    Drop files here or click to browse
+                  </p>
+                  <p className="text-sm text-slate-500 dark:text-slate-500">
+                    Supports .xlsx and .xls files
+                  </p>
+                </label>
+              </div>
+
+              {files.length > 0 && (
+                <div className="mt-6 space-y-4">
+                  <div className="flex items-center justify-between">
+                    <h3 className="font-semibold text-slate-900 dark:text-slate-50">
+                      Files Queue ({files.length})
+                    </h3>
+                    <div className="flex gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={clearAll}
+                        disabled={isProcessing}
+                      >
+                        <Trash2 className="w-4 h-4 mr-2" />
+                        Clear All
+                      </Button>
+                      <Button
+                        onClick={compileFiles}
+                        disabled={isProcessing || files.length === 0}
+                      >
+                        {isProcessing ? (
+                          <>
+                            <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                            Processing...
+                          </>
+                        ) : (
+                          <>
+                            <FileSpreadsheet className="w-4 h-4 mr-2" />
+                            Compile All Files
+                          </>
+                        )}
+                      </Button>
+                    </div>
+                  </div>
+
+                  <div className="space-y-2 max-h-96 overflow-y-auto">
+                    {files.map((file, index) => (
+                      <Card key={index}>
+                        <CardContent className="p-4">
+                          <div className="flex items-center justify-between gap-4">
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-2">
+                                <FileSpreadsheet className="w-5 h-5 text-green-600 flex-shrink-0" />
+                                <p className="font-medium text-slate-900 dark:text-slate-50 truncate">
+                                  {file.name}
+                                </p>
+                                <p className="text-sm text-slate-500 dark:text-slate-500">
+                                  ({(file.size / 1024).toFixed(1)} KB)
+                                </p>
+                              </div>
+                            </div>
+
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={() => removeFile(index)}
+                              disabled={isProcessing}
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </Button>
+                          </div>
+                        </CardContent>
+                      </Card>
+                    ))}
+                  </div>
+
+                  {compiledFileUrl && (
+                    <Card className="border-green-200 dark:border-green-800 bg-green-50 dark:bg-green-950/20">
+                      <CardContent className="p-4">
+                        <div className="flex items-center justify-between gap-4">
+                          <div className="flex items-center gap-2">
+                            <CheckCircle className="w-5 h-5 text-green-600" />
+                            <p className="font-medium text-green-900 dark:text-green-100">
+                              Compilation Complete!
+                            </p>
+                            <p className="text-sm text-green-700 dark:text-green-300">
+                              {files.length} file(s) compiled successfully
+                            </p>
+                          </div>
+                          <Button
+                            onClick={downloadCompiledFile}
+                            size="sm"
+                          >
+                            <Download className="w-4 h-4 mr-2" />
+                            Download Compiled File
+                          </Button>
+                        </div>
+                      </CardContent>
+                    </Card>
+                  )}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card className="bg-blue-50 dark:bg-blue-950/20 border-blue-200 dark:border-blue-800">
+            <CardContent className="p-4">
+              <div className="flex items-start gap-3">
+                <FileSpreadsheet className="w-6 h-6 text-blue-600 flex-shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <p className="text-sm font-medium text-blue-900 dark:text-blue-100">
+                    All Processing Happens in Your Browser
+                  </p>
+                  <p className="text-sm text-blue-700 dark:text-blue-300">
+                    Your data never leaves your device. All Excel files are processed client-side for maximum privacy and security.
+                  </p>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      </main>
+
+      <footer className="bg-slate-50 dark:bg-slate-950 border-t border-slate-200 dark:border-slate-800 mt-auto">
+        <div className="container mx-auto px-4 py-6">
+          <p className="text-center text-sm text-slate-600 dark:text-slate-400">
+            Excel File Compiler - 100% Client-side processing for maximum privacy
+          </p>
+        </div>
+      </footer>
+    </div>
+  )
+}
