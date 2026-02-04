@@ -1,9 +1,26 @@
 'use client'
 
 import { useState, useCallback } from 'react'
-import { Upload, FileSpreadsheet, Download, Trash2, CheckCircle, Loader2 } from 'lucide-react'
+import { Upload, FileSpreadsheet, Download, Trash2, CheckCircle, Loader2, Eye } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table'
+import { ScrollArea } from '@/components/ui/scroll-area'
 import { useToast } from '@/hooks/use-toast'
 import * as XLSX from 'xlsx'
 
@@ -124,7 +141,7 @@ function processExcelFile(arrayBuffer: ArrayBuffer): ProcessedRow[] {
     }
     
     // Extract values from each metric row (rows 1-9)
-    // Column index in data corresponds to dateIdx + 1 (since column 0 is the label)
+    // Column index in data corresponds to dateIdx + 1 (since column 0 is a label)
     const dataColIndex = dateIdx + 1
     
     if (data[1] && dataColIndex < data[1].length) {
@@ -193,6 +210,22 @@ function generateCompiledExcel(allRows: ProcessedRow[]): ArrayBuffer {
   
   const worksheet = XLSX.utils.json_to_sheet(worksheetData)
   
+  // Apply custom number formatting to cells
+  const range = XLSX.utils.decode_range(worksheet['!ref'] || 'A1')
+  for (let R = range.s.r + 1; R <= range.e.r + 1; R++) {
+    for (let C = range.s.c; C <= range.e.c; C++) {
+      const cellAddress = XLSX.utils.encode_cell({ r: R, c: C })
+      const cell = worksheet[cellAddress]
+      if (!cell) continue
+      
+      // Column C (index 2) is Capacity reliability score - apply percentage format
+      if (C === 2 && R > 0) { // Skip header row
+        cell.z = '0.0%'
+        cell.t = 'n' // Ensure type is number
+      }
+    }
+  }
+  
   // Set column widths
   worksheet['!cols'] = [
     { wch: 15 }, // Date
@@ -228,6 +261,8 @@ export default function Home() {
   const [files, setFiles] = useState<File[]>([])
   const [isProcessing, setIsProcessing] = useState(false)
   const [compiledFileUrl, setCompiledFileUrl] = useState<string | null>(null)
+  const [compiledData, setCompiledData] = useState<ProcessedRow[] | null>(null)
+  const [showPreview, setShowPreview] = useState(false)
   const { toast } = useToast()
 
   const onDragOver = useCallback((e: React.DragEvent) => {
@@ -259,6 +294,8 @@ export default function Home() {
 
     setFiles((prev) => [...prev, ...droppedFiles])
     setCompiledFileUrl(null)
+    setCompiledData(null)
+    setShowPreview(false)
     toast({
       title: 'Files added',
       description: `${droppedFiles.length} file(s) added to the queue.`,
@@ -281,6 +318,8 @@ export default function Home() {
 
     setFiles((prev) => [...prev, ...selectedFiles])
     setCompiledFileUrl(null)
+    setCompiledData(null)
+    setShowPreview(false)
     toast({
       title: 'Files added',
       description: `${selectedFiles.length} file(s) added to the queue.`,
@@ -292,6 +331,8 @@ export default function Home() {
   const removeFile = useCallback((index: number) => {
     setFiles((prev) => prev.filter((_, i) => i !== index))
     setCompiledFileUrl(null)
+    setCompiledData(null)
+    setShowPreview(false)
   }, [])
 
   const compileFiles = async () => {
@@ -306,6 +347,7 @@ export default function Home() {
 
     setIsProcessing(true)
     setCompiledFileUrl(null)
+    setCompiledData(null)
 
     try {
       const allRows: ProcessedRow[] = []
@@ -336,6 +378,9 @@ export default function Home() {
         return
       }
 
+      // Sort all rows by date
+      allRows.sort((a, b) => a.Date.getTime() - b.Date.getTime())
+      
       // Generate compiled Excel file
       const excelBuffer = generateCompiledExcel(allRows)
       
@@ -345,7 +390,9 @@ export default function Home() {
       })
       const url = URL.createObjectURL(blob)
       
+      setCompiledData(allRows)
       setCompiledFileUrl(url)
+      setShowPreview(true) // Automatically open preview dialog
 
       toast({
         title: 'Compilation complete',
@@ -377,10 +424,19 @@ export default function Home() {
   const clearAll = useCallback(() => {
     setFiles([])
     setCompiledFileUrl(null)
+    setCompiledData(null)
+    setShowPreview(false)
     if (compiledFileUrl) {
       URL.revokeObjectURL(compiledFileUrl)
     }
   }, [compiledFileUrl])
+
+  const formatDate = (date: Date): string => {
+    const month = String(date.getMonth() + 1).padStart(2, '0')
+    const day = String(date.getDate()).padStart(2, '0')
+    const year = date.getFullYear()
+    return `${month}/${day}/${year}`
+  }
 
   return (
     <div className="min-h-screen flex flex-col bg-gradient-to-br from-slate-50 to-slate-100 dark:from-slate-950 dark:to-slate-900">
@@ -494,7 +550,7 @@ export default function Home() {
                     ))}
                   </div>
 
-                  {compiledFileUrl && (
+                  {compiledFileUrl && !showPreview && (
                     <Card className="border-green-200 dark:border-green-800 bg-green-50 dark:bg-green-950/20">
                       <CardContent className="p-4">
                         <div className="flex items-center justify-between gap-4">
@@ -507,13 +563,23 @@ export default function Home() {
                               {files.length} file(s) compiled successfully
                             </p>
                           </div>
-                          <Button
-                            onClick={downloadCompiledFile}
-                            size="sm"
-                          >
-                            <Download className="w-4 h-4 mr-2" />
-                            Download Compiled File
-                          </Button>
+                          <div className="flex gap-2">
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => setShowPreview(true)}
+                            >
+                              <Eye className="w-4 h-4 mr-2" />
+                              Preview
+                            </Button>
+                            <Button
+                              onClick={downloadCompiledFile}
+                              size="sm"
+                            >
+                              <Download className="w-4 h-4 mr-2" />
+                              Download
+                            </Button>
+                          </div>
                         </div>
                       </CardContent>
                     </Card>
@@ -541,13 +607,70 @@ export default function Home() {
         </div>
       </main>
 
-      <footer className="bg-slate-50 dark:bg-slate-950 border-t border-slate-200 dark:border-slate-800 mt-auto">
-        <div className="container mx-auto px-4 py-6">
-          <p className="text-center text-sm text-slate-600 dark:text-slate-400">
-            Excel File Compiler - 100% Client-side processing for maximum privacy
-          </p>
-        </div>
-      </footer>
+      {/* Preview Dialog */}
+<Dialog open={showPreview} onOpenChange={setShowPreview}>
+  <DialogContent className="!w-[98vw] !max-w-[98vw] max-h-[90vh] overflow-hidden p-0">
+    <DialogHeader>
+      <DialogTitle>Compiled Data Preview</DialogTitle>
+      <DialogDescription>
+        Review the compiled data before downloading. Showing {compiledData?.length || 0} rows from {files.length} file(s).
+      </DialogDescription>
+    </DialogHeader>
+    
+    <ScrollArea className="max-h-[70vh] overflow-auto">
+      <div className="min-w-full overflow-x-auto">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead className="whitespace-nowrap min-w-[100px]">Date</TableHead>
+              <TableHead className="whitespace-nowrap min-w-[60px]">Week#</TableHead>
+              <TableHead className="whitespace-nowrap min-w-[150px]">Capacity reliability score</TableHead>
+              <TableHead className="whitespace-nowrap min-w-[120px]">Completed routes</TableHead>
+              <TableHead className="whitespace-nowrap min-w-[140px]">Amazon paid cancels</TableHead>
+              <TableHead className="whitespace-nowrap min-w-[130px]">DSP dropped routes</TableHead>
+              <TableHead className="whitespace-nowrap min-w-[130px]">Reliability target</TableHead>
+              <TableHead className="whitespace-nowrap min-w-[110px]">Route target</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {compiledData?.map((row, index) => (
+              <TableRow key={index}>
+                <TableCell className="whitespace-nowrap font-medium">{formatDate(row.Date)}</TableCell>
+                <TableCell className="whitespace-nowrap">{row['Week#']}</TableCell>
+                <TableCell className="whitespace-nowrap">
+                  {typeof row['Capacity reliability score'] === 'number' 
+                    ? `${(row['Capacity reliability score'] * 100).toFixed(1)}%` 
+                    : '-'}
+                </TableCell>
+                <TableCell className="whitespace-nowrap">{row['Completed routes'] ?? '-'}</TableCell>
+                <TableCell className="whitespace-nowrap">{row['Amazon paid cancels'] ?? '-'}</TableCell>
+                <TableCell className="whitespace-nowrap">{row['DSP dropped routes'] ?? '-'}</TableCell>
+                <TableCell className="whitespace-nowrap">{row['Reliability target'] ?? '-'}</TableCell>
+                <TableCell className="whitespace-nowrap">{row['Route target'] ?? '-'}</TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </div>
+    </ScrollArea>
+
+    <DialogFooter className="flex gap-2 p-4 border-t">
+      <Button
+        variant="outline"
+        onClick={() => setShowPreview(false)}
+      >
+        Close
+      </Button>
+      <Button
+        onClick={downloadCompiledFile}
+        disabled={!compiledFileUrl}
+      >
+        <Download className="w-4 h-4 mr-2" />
+        Download Compiled File
+      </Button>
+    </DialogFooter>
+  </DialogContent>
+</Dialog> 
     </div>
   )
 }
