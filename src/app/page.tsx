@@ -72,13 +72,24 @@ function parseNumber(value: any): number | null {
 }
 
 function getWeekNumber(date: Date): number {
+  // Create a copy of the date in UTC to match existing code style
   const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()))
-  const dayNum = d.getUTCDay() || 7
-  d.setUTCDate(d.getUTCDate() + 4 - dayNum)
-  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1))
-  const weekNo = Math.ceil((((d.getTime() - yearStart.getTime()) / 86400000) + 1) / 7)
-  return weekNo
+  
+  // Get January 1st of the same year in UTC
+  const jan1 = new Date(Date.UTC(d.getFullYear(), 0, 1))
+  
+  // Calculate the day of the year (1 to 366)
+  const dayOfYear = ((d.getTime() - jan1.getTime()) / 86400000) + 1
+  
+  // Get the day of the week for Jan 1st (0 = Sunday, 1 = Monday, ..., 6 = Saturday)
+  const dayOfWeekJan1 = jan1.getUTCDay()
+  
+  // Calculate week number. 
+  // Formula: Week 1 is the week containing Jan 1st.
+  // This matches standard US/Excel Week numbering starting on Sunday.
+  return Math.ceil((dayOfYear + dayOfWeekJan1) / 7)
 }
+
 
 function processExcelFile(arrayBuffer: ArrayBuffer): ProcessedRow[] {
   const workbook = XLSX.read(arrayBuffer, { type: 'array', cellDates: true })
